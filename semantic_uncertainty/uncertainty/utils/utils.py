@@ -7,6 +7,7 @@ import pickle
 import wandb
 
 from evaluate import load
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
 from uncertainty.models.huggingface_models import HuggingfaceModel
 from uncertainty.utils import openai as oai
@@ -278,6 +279,16 @@ def init_model(args):
         model = HuggingfaceModel(
             mn, stop_sequences='default',
             max_new_tokens=args.model_max_new_tokens)
+        # === ADD SUPPORT FOR FLAN-T5 MODELS ===
+    elif mn == "flan-t5-base":
+        # Use the generic HuggingfaceModel wrapper so the rest of the
+        # codebase can call model.predict(prompt, temperature).
+        return HuggingfaceModel(
+        "google/flan-t5-base",
+        stop_sequences="default",
+        max_new_tokens=getattr(args, "max_new_tokens", 64),
+        )
+
     else:
         raise ValueError(f'Unknown model_name `{mn}`.')
     return model

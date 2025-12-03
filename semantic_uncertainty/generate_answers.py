@@ -195,9 +195,16 @@ def main(args):
             # Grab example at index.
             example = dataset[index]
             question, context = example["question"], example['context']
-            generations[example['id']] = {'question': question, 'context': context}
+            
+            generations[example['id']] = {
+                'question': question,
+                'context': context,
+                'dialogue_id': example.get('dialogue_id'),
+                'turn_index': example.get('turn_index'),
+            }
             correct_answer = example['answers']['text']
-
+            
+        
             # Build input prompt for current example.
             current_input = make_prompt(
                 context, question, None, BRIEF, args.brief_always and args.enable_brief
