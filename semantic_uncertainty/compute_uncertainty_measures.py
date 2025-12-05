@@ -28,24 +28,22 @@ utils.setup_logger()
 
 EXP_DETAILS = 'experiment_details.pkl'
 
+
 def compute_memory_weights(memory_text, responses, entailment_model, example):
     """
     Compute a memory-consistency weight w_j for each generated response r_j.
-
-    We use the entailment model to check if the memory (previous gold turns)
-    semantically supports or contradicts the new response.
 
     entailment_model.check_implication(memory_text, r_j, example=example) returns:
         2 -> entailment
         1 -> neutral
         0 -> contradiction
 
-    We map these to simple scalar weights:
+    We map these to:
         entailment    -> 1.0
         neutral       -> 0.7
         contradiction -> 0.3
     """
-    if not memory_text.strip():
+    if not memory_text or not memory_text.strip():
         # No memory yet: all weights 1.0 (reduces to vanilla SE)
         return [1.0] * len(responses)
 
@@ -69,42 +67,36 @@ def compute_memory_weights(memory_text, responses, entailment_model, example):
 
 def compute_mc_semantic_entropy(semantic_ids, log_liks_agg, weights):
     """
-    Compute Memory-Conditioned Semantic Entropy (MC-SE).
+    Memory-Conditioned Semantic Entropy (MC-SE).
 
     Vanilla SE:
-        1. cluster generations into semantic_ids
-        2. convert log_liks_agg -> probabilities over samples
-        3. sum probability mass per semantic cluster
-        4. entropy over that cluster distribution
+        - cluster generations into semantic_ids
+        - convert log_liks_agg -> probabilities over samples
+        - sum probability mass per semantic cluster
+        - entropy over that cluster distribution
 
     MC-SE:
-        same, but each sample is reweighted by a memory weight w_j.
-
         p_j ∝ exp(log_liks_agg[j]) * w_j
 
-        then cluster probs π_k ∝ sum_{j in cluster k} p_j
+        cluster probs π_k ∝ sum_{j in cluster k} p_j
 
         H_MC = - sum_k π_k log π_k
     """
     semantic_ids = list(semantic_ids)
     log_liks_agg = list(log_liks_agg)
     weights = list(weights)
-
     assert len(semantic_ids) == len(log_liks_agg) == len(weights)
 
-    # convert log-likelihoods to weighted probabilities
     probs = []
     for logp, w in zip(log_liks_agg, weights):
         probs.append(np.exp(logp) * w)
 
     Z = np.sum(probs)
     if Z == 0 or not np.isfinite(Z):
-        # fallback: just use vanilla log_liks_agg distribution
-        # (this should almost never happen)
+        # fallback: vanilla distribution
         log_probs = log_liks_agg
     else:
         probs = np.array(probs) / Z
-        # aggregate by cluster id
         unique_ids = sorted(set(semantic_ids))
         cluster_probs = []
         for uid in unique_ids:
@@ -113,12 +105,11 @@ def compute_mc_semantic_entropy(semantic_ids, log_liks_agg, weights):
 
         cluster_probs = np.array(cluster_probs)
         cluster_probs = cluster_probs / cluster_probs.sum()
-        # convert to log space for entropy helper
         log_probs = np.log(cluster_probs + 1e-12)
 
-    # reuse predictive_entropy_rao: it expects log p's
     return predictive_entropy_rao(log_probs)
-    
+
+
 def main(args):
 
     if args.train_wandb_runid is None:
@@ -129,6 +120,7 @@ def main(args):
     wandb_dir = f'{scratch_dir}/{user}/uncertainty'
     slurm_jobid = os.getenv('SLURM_JOB_ID', None)
     project = "semantic_uncertainty" if not args.debug else "semantic_uncertainty_debug"
+
     if args.assign_new_wandb_id:
         logging.info('Assign new wandb_id.')
         api = wandb.Api()
@@ -138,10 +130,6 @@ def main(args):
             project=project,
             dir=wandb_dir,
             notes=f'slurm_id: {slurm_jobid}, experiment_lot: {args.experiment_lot}',
-            # For convenience, keep any 'generate_answers' configs from old run,
-            # but overwrite the rest!
-            # NOTE: This means any special configs affecting this script must be
-            # called again when calling this script!
             config={**old_run.config, **args.__dict__},
         )
 
@@ -151,8 +139,8 @@ def main(args):
 
             class Restored:
                 name = f'{wandb.run.dir}/{filename}'
-
             return Restored
+
     else:
         logging.info('Reuse active wandb id.')
 
@@ -163,10 +151,9 @@ def main(args):
 
     if args.train_wandb_runid != args.eval_wandb_runid:
         logging.info(
-            "Distribution shift for p_ik. Training on embeddings from run %s but evaluating on run %s",
+            "Distribution shift for p_ik. Train on run %s, eval on run %s",
             args.train_wandb_runid, args.eval_wandb_runid)
-
-        is_ood_eval = True  # pylint: disable=invalid-name
+        is_ood_eval = True
         api = wandb.Api()
         old_run_train = api.run(f'{args.restore_entity_train}/semantic_uncertainty/{args.train_wandb_runid}')
         filename = 'train_generations.pkl'
@@ -177,7 +164,7 @@ def main(args):
         wandb.config.update(
             {"ood_training_set": old_run_train.config['dataset']}, allow_val_change=True)
     else:
-        is_ood_eval = False  # pylint: disable=invalid-name
+        is_ood_eval = False
         if args.compute_p_ik or args.compute_p_ik_answerable:
             train_generations_pickle = restore('train_generations.pkl')
             with open(train_generations_pickle.name, 'rb') as infile:
@@ -185,7 +172,7 @@ def main(args):
 
     wandb.config.update({"is_ood_eval": is_ood_eval}, allow_val_change=True)
 
-    # Load entailment model.
+    # Load entailment model (used for SE + semantic correctness + memory checks).
     if args.compute_predictive_entropy:
         logging.info('Beginning loading for entailment model.')
         if args.entailment_model == 'deberta':
@@ -201,9 +188,10 @@ def main(args):
         else:
             raise ValueError
         logging.info('Entailment model loading complete.')
+    else:
+        entailment_model = None  # you should keep compute_predictive_entropy=True for our setup
 
     if args.compute_p_true_in_compute_stage:
-        # This is usually not called.
         old_exp = restore(EXP_DETAILS)
         with open(old_exp.name, "rb") as infile:
             old_exp = pickle.load(infile)
@@ -218,7 +206,6 @@ def main(args):
             seed=args.random_seed)
         del pt_validation_dataset
 
-        # Reduce num generations used in p_true if needed!
         if not args.use_all_generations:
             if args.use_num_generations == -1:
                 raise ValueError
@@ -242,16 +229,15 @@ def main(args):
         wandb.log(dict(len_p_true=len_p_true))
 
         logging.info('Generated few-shot prompt for p_true.')
-        logging.info(80*'#')
+        logging.info(80 * '#')
         logging.info('p_true_few_shot_prompt: %s', p_true_few_shot_prompt)
-        logging.info(80*'#')
+        logging.info(80 * '#')
 
     if args.recompute_accuracy:
-        # This is usually not enabled.
-        logging.warning('Recompute accuracy enabled. This does not apply to precomputed p_true!')
+        logging.warning('Recompute accuracy enabled (not used for p_true).')
         metric = utils.get_metric(args.metric)
 
-    # Restore outputs from `generate_answrs.py` run.
+    # Restore outputs from `generate_answers.py` run.
     result_dict_pickle = restore('uncertainty_measures.pkl')
     with open(result_dict_pickle.name, "rb") as infile:
         result_dict = pickle.load(infile)
@@ -264,28 +250,28 @@ def main(args):
     entropies = defaultdict(list)
     validation_embeddings, validation_is_true, validation_answerable = [], [], []
     p_trues = []
-    count = 0  # pylint: disable=invalid-name
+    count = 0
 
-        # Build an ordered list of validation examples:
-    # sort by (dialogue_id, turn_index) so we can maintain a dialogue-level memory.
+    # Build ordered list of examples (dialogue_id, turn_index, tid)
     ordered_items = []
     for tid, ex in validation_generations.items():
         dlg_id = ex.get('dialogue_id')
         turn_idx = ex.get('turn_index', 0)
         ordered_items.append((dlg_id, turn_idx, tid))
-
-    # Sort by dialogue then by turn
     ordered_items.sort(key=lambda x: (x[0], x[1]))
 
-    # Simple memory: list of past gold system utterances per dialogue
     from collections import defaultdict as _dd
     dialogue_memories = _dd(list)
 
     def is_answerable(generation):
         return len(generation['reference']['answers']['text']) > 0
 
-    # Loop over datapoints and compute validation embeddings and entropies.
-        # Loop over datapoints in dialogue order and compute embeddings/entropies.
+    # New semantic labels
+    validation_semantic_is_true = []
+    validation_hallucinated = []
+    validation_memory_inconsistent = []
+
+    # Loop over datapoints in dialogue order
     for idx, (dlg_id, turn_idx, tid) in enumerate(ordered_items):
 
         example = validation_generations[tid]
@@ -294,12 +280,11 @@ def main(args):
         full_responses = example["responses"]
         most_likely_answer = example['most_likely_answer']
 
-        # memory: concatenation of previous gold system utterances in this dialogue
+        # Dialogue-level memory: previous gold system utterances
         if dialogue_memories[dlg_id]:
             memory_text = "\n".join(dialogue_memories[dlg_id])
         else:
             memory_text = ""
-
 
         if not args.use_all_generations:
             if args.use_num_generations == -1:
@@ -308,24 +293,49 @@ def main(args):
         else:
             responses = [fr[0] for fr in full_responses]
 
-        if args.recompute_accuracy:
-            logging.info('Recomputing accuracy!')
-            if is_answerable(example):
-                acc = metric(most_likely_answer['response'], example, None)
-            else:
-                acc = 0.0  # pylint: disable=invalid-name
-            validation_is_true.append(acc)
-            logging.info('Recomputed accuracy!')
-
+        # === SEMANTIC CORRECTNESS (gold vs answer) ===
+        gold_answers = example['reference']['answers']['text']
+        if gold_answers:
+            gold = gold_answers[0]
         else:
-            validation_is_true.append(most_likely_answer['accuracy'])
+            gold = ""
 
+        label_ans = entailment_model.check_implication(
+            gold,
+            most_likely_answer['response'],
+            example=example,
+        )
+        semantic_correct = 0.0 if label_ans == 0 else 1.0
+        validation_semantic_is_true.append(semantic_correct)
+
+        # hallucination: only if it contradicts the gold
+        hallucinated = 1.0 - semantic_correct
+        validation_hallucinated.append(hallucinated)
+        
+        # use semantic correctness as the main "true" label
+        validation_is_true.append(semantic_correct)
+
+        # === MEMORY CONSISTENCY (context + memory vs answer) ===
+        if memory_text:
+            full_premise = context + "\n" + memory_text
+        else:
+            full_premise = context
+
+        ctx_label = entailment_model.check_implication(
+            full_premise,
+            most_likely_answer['response'],
+            example=example,
+        )
+        memory_inconsistent = 1.0 if ctx_label == 0 else 0.0
+        validation_memory_inconsistent.append(memory_inconsistent)
+
+        # Answerable / embeddings for p_ik, etc.
         validation_answerable.append(is_answerable(example))
         validation_embeddings.append(most_likely_answer['embedding'])
         logging.info('validation_is_true: %f', validation_is_true[-1])
 
+        # === Predictive & semantic entropy (including MC-SE) ===
         if args.compute_predictive_entropy:
-            # Token log likelihoods. Shape = (n_sample, n_tokens)
             if not args.use_all_generations:
                 log_liks = [r[1] for r in full_responses[:args.use_num_generations]]
             else:
@@ -335,58 +345,51 @@ def main(args):
                 assert i
 
             if args.compute_context_entails_response:
-                # Compute context entails answer baseline.
-                entropies['context_entails_response'].append(context_entails_response(
-                    context, responses, entailment_model))
+                entropies['context_entails_response'].append(
+                    context_entails_response(context, responses, entailment_model))
 
             if args.condition_on_question and args.entailment_model == 'deberta':
                 responses = [f'{question} {r}' for r in responses]
 
-            # Compute semantic ids.
+            # Compute semantic ids
             semantic_ids = get_semantic_ids(
                 responses, model=entailment_model,
                 strict_entailment=args.strict_entailment, example=example)
-
             result_dict['semantic_ids'].append(semantic_ids)
 
-            # Compute entropy from frequencies of cluster assignments.
-            entropies['cluster_assignment_entropy'].append(cluster_assignment_entropy(semantic_ids))
+            # Cluster assignment entropy
+            entropies['cluster_assignment_entropy'].append(
+                cluster_assignment_entropy(semantic_ids))
 
-            # Length normalization of generation probabilities.
+            # Token log-likelihood aggregation
             log_liks_agg = [np.mean(log_lik) for log_lik in log_liks]
 
-            # Compute naive entropy.
+            # Naive entropy
             entropies['regular_entropy'].append(predictive_entropy(log_liks_agg))
 
-            # Compute semantic entropy.
-            log_likelihood_per_semantic_id = logsumexp_by_id(semantic_ids, log_liks_agg, agg='sum_normalized')
+            # Semantic entropy (vanilla SE)
+            log_likelihood_per_semantic_id = logsumexp_by_id(
+                semantic_ids, log_liks_agg, agg='sum_normalized')
             pe = predictive_entropy_rao(log_likelihood_per_semantic_id)
             entropies['semantic_entropy'].append(pe)
 
-                        # ==== NEW: Memory-Conditioned Semantic Entropy (MC-SE) ====
-            # 1) compute memory weights for each sampled response
+            # === Memory-Conditioned Semantic Entropy (MC-SE) ===
             mem_weights = compute_memory_weights(
                 memory_text=memory_text,
                 responses=responses,
                 entailment_model=entailment_model,
                 example=example,
             )
-
-            # 2) compute MC-SE using memory-weighted cluster probabilities
             pe_mc = compute_mc_semantic_entropy(
                 semantic_ids=semantic_ids,
                 log_liks_agg=log_liks_agg,
                 weights=mem_weights,
             )
             entropies['semantic_entropy_mc'].append(pe_mc)
-            # ==== END MC-SE ====
 
-            
-            # pylint: disable=invalid-name
             log_str = 'semantic_ids: %s, avg_token_log_likelihoods: %s, entropies: %s'
             entropies_fmt = ', '.join([f'{i}:{j[-1]:.2f}' for i, j in entropies.items()])
-            # pylint: enable=invalid-name
-            logging.info(80*'#')
+            logging.info(80 * '#')
             logging.info('NEW ITEM %d at id=`%s`.', idx, tid)
             logging.info('Context:')
             logging.info(example['context'])
@@ -411,25 +414,26 @@ def main(args):
             p_trues.append(p_true)
             logging.info('p_true: %s', np.exp(p_true))
 
-                # Update dialogue memory with this turn's gold system utterance
-        # We use the "reference" object saved in generate_answers.py
+        # Update dialogue memory with this turn's gold system utterance
         ref = example.get('reference')
-        gold_answers = None
+        gold_answers_ref = None
         if ref is not None and 'answers' in ref and 'text' in ref['answers']:
-            gold_answers = ref['answers']['text']
+            gold_answers_ref = ref['answers']['text']
         elif 'answers' in example and 'text' in example['answers']:
-            gold_answers = example['answers']['text']
+            gold_answers_ref = example['answers']['text']
 
-        if gold_answers:
-            # store only the first gold system utterance for this turn
-            dialogue_memories[dlg_id].append(gold_answers[0])
+        if gold_answers_ref:
+            dialogue_memories[dlg_id].append(gold_answers_ref[0])
 
         count += 1
         if count >= args.num_eval_samples:
             logging.info('Breaking out of main loop.')
             break
 
-    logging.info('Accuracy on original task: %f', np.mean(validation_is_true))
+    # === Summary metrics & labels ===
+    logging.info('Semantic accuracy: %f', np.mean(validation_semantic_is_true))
+    result_dict['validation_semantic_is_true'] = validation_semantic_is_true
+
     validation_is_false = [1.0 - is_t for is_t in validation_is_true]
     result_dict['validation_is_false'] = validation_is_false
 
@@ -437,17 +441,24 @@ def main(args):
     result_dict['validation_unanswerable'] = validation_unanswerable
     logging.info('Unanswerable prop on validation: %f', np.mean(validation_unanswerable))
 
+    # Hallucinations: 1 = hallucinated (not semantically correct)
+    result_dict['validation_hallucinated'] = validation_hallucinated
+    logging.info('Hallucination rate: %f', np.mean(validation_hallucinated))
+
+    # Memory inconsistency: 1 = contradicts context + memory
+    result_dict['validation_memory_inconsistent'] = validation_memory_inconsistent
+    logging.info('Memory inconsistency rate: %f', np.mean(validation_memory_inconsistent))
+
     if 'uncertainty_measures' not in result_dict:
         result_dict['uncertainty_measures'] = dict()
 
     if args.compute_predictive_entropy:
         result_dict['uncertainty_measures'].update(entropies)
+        # Make sure MC-SE is directly accessible
+        result_dict['uncertainty_measures']['semantic_entropy_mc'] = entropies['semantic_entropy_mc']
 
-    result_dict['uncertainty_measures']['semantic_entropy_mc']
-
-
+    # === p_ik training and evaluation ===
     if args.compute_p_ik or args.compute_p_ik_answerable:
-        # Assemble training data for embedding classification.
         train_is_true, train_embeddings, train_answerable = [], [], []
         for tid in train_generations:
             most_likely_answer = train_generations[tid]['most_likely_answer']
@@ -460,7 +471,6 @@ def main(args):
 
     if args.compute_p_ik:
         logging.info('Starting training p_ik on train embeddings.')
-        # Train classifier of correct/incorrect from embeddings.
         p_ik_predictions = get_p_ik(
             train_embeddings=train_embeddings, is_false=train_is_false,
             eval_embeddings=validation_embeddings, eval_is_false=validation_is_false)
@@ -468,7 +478,6 @@ def main(args):
         logging.info('Finished training p_ik on train embeddings.')
 
     if args.compute_p_ik_answerable:
-        # Train classifier of answerable/unanswerable.
         p_ik_predictions = get_p_ik(
             train_embeddings=train_embeddings, is_false=train_unanswerable,
             eval_embeddings=validation_embeddings, eval_is_false=validation_unanswerable)
@@ -480,11 +489,10 @@ def main(args):
 
     utils.save(result_dict, 'uncertainty_measures.pkl')
 
-    if args.compute_predictive_entropy:
+    if args.compute_predictive_entropy and hasattr(entailment_model, "save_prediction_cache"):
         entailment_model.save_prediction_cache()
 
     if args.analyze_run:
-        # Follow up with computation of aggregate performance metrics.
         logging.info(50 * '#X')
         logging.info('STARTING `analyze_run`!')
         analyze_run(wandb.run.id)
