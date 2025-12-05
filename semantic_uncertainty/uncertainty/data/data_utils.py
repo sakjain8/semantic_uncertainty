@@ -28,67 +28,6 @@ def load_ds(dataset_name, seed, add_options=None):
         train_dataset = [reformat(d) for d in train_dataset]
         validation_dataset = [reformat(d) for d in validation_dataset]
 
-    elif dataset_name == "multiwoz":
-        # Multi-turn dialogue dataset: convert to QA-style examples:
-        # Question = last USER utterance
-        # Answer   = SYSTEM reply
-        dataset = datasets.load_dataset("pfb30/multi_woz_v22")
-
-        def convert(split_name):
-            ds_split = dataset[split_name]
-            # speaker is a ClassLabel: 0 -> USER, 1 -> SYSTEM
-            speaker_label = ds_split.features["turns"].feature["speaker"]
-
-            data = []
-            for dialog in ds_split:
-                dialogue_id = dialog["dialogue_id"]
-                turns = dialog["turns"]  # dict-of-lists
-
-                num_turns = len(turns["turn_id"])
-                history = []  # list of "SPEAKER: utterance" strings
-
-                for i in range(num_turns):
-                    # extract one logical turn
-                    speaker_raw = turns["speaker"][i]
-                    if isinstance(speaker_raw, str):
-                        speaker = speaker_raw
-                    else:
-                        speaker = speaker_label.int2str(speaker_raw)  # 0/1 -> "USER"/"SYSTEM"
-
-                    utt = turns["utterance"][i]
-                    turn_id = turns["turn_id"][i]
-
-                    # add to running history
-                    history.append(f"{speaker}: {utt}")
-
-                    # only create example when SYSTEM speaks
-                    if speaker == "SYSTEM":
-                        user_utt = None
-                        for prev in reversed(history[:-1]):
-                            if prev.startswith("USER:"):
-                                user_utt = prev[len("USER: "):]
-                                break
-
-                        if user_utt is None:
-                            continue  # no preceding user utterance
-
-                        full_context = "\n".join(history[:-1])
-
-                        ex = {
-                            "id": f"{dialogue_id}_{turn_id}",
-                            "context": full_context,
-                            "question": user_utt,
-                            "answers": {"text": [utt]},
-                            "dialogue_id": dialogue_id,
-                            "turn_index": turn_id,
-                        }
-                        data.append(ex)
-
-            return data
-
-        train_dataset = convert("train")
-        validation_dataset = convert("validation")
-        
     elif dataset_name == 'nq':
         dataset = datasets.load_dataset("nq_open")
         train_dataset = dataset["train"]
@@ -99,7 +38,7 @@ def load_ds(dataset_name, seed, add_options=None):
             'question': x['question']+'?',
             'answers': {'text': x['answer']},
             'context': '',
-            'id': md5hash(str(x['question'])),
+            'id': md5hash(str(x['question'])) if 'question' in x else md5hash(str(x)),
         }
 
         train_dataset = [reformat(d) for d in train_dataset]
@@ -159,6 +98,47 @@ def load_ds(dataset_name, seed, add_options=None):
         dataset = dataset.train_test_split(test_size=0.8, seed=seed)
         train_dataset = dataset['train']
         validation_dataset = dataset['test']
+
+    elif dataset_name == "coqa":
+        # CoQA (Conversational QA) adapter: yield per-turn QA pairs.
+        # HuggingFace dataset id: 'stanfordnlp/coqa'
+        # We'll flatten each dialog into separate (context, question, answer) instances.
+        raw = datasets.load_dataset("stanfordnlp/coqa")
+        # HF might have 'train' and 'validation' splits; handle both cases.
+        if isinstance(raw, dict) and 'train' in raw and 'validation' in raw:
+            raw_train = raw['train']
+            raw_val = raw['validation']
+        else:
+            # fallback: try load with explicit split names
+            try:
+                raw_train = datasets.load_dataset("stanfordnlp/coqa", split="train")
+                raw_val = datasets.load_dataset("stanfordnlp/coqa", split="validation")
+            except Exception:
+                # If dataset doesn't provide validation, fall back to train/test split
+                raw_all = datasets.load_dataset("stanfordnlp/coqa")
+                # try to split into 80/20 (seed for reproducibility)
+                raw_train = raw_all['train']
+                raw_val = raw_all['validation'] if 'validation' in raw_all else raw_all['train'].select(range(int(0.8 * len(raw_all['train'])) , len(raw_all['train'])))
+
+        def reformat_coqa(rows):
+            out = []
+            for doc_idx, row in enumerate(rows):
+                story = row.get('story') or row.get('context') or ''
+                questions = row.get('questions', [])
+                answers = row.get('answers', [])
+                # answers in HF are often a list of strings
+                for turn_idx, (q, a) in enumerate(zip(questions, answers)):
+                    example = {
+                        'question': q,
+                        'context': story,
+                        'answers': {'text': [a]},
+                        'id': f'coqa-{doc_idx}-{turn_idx}'
+                    }
+                    out.append(example)
+            return out
+
+        train_dataset = reformat_coqa(raw_train)
+        validation_dataset = reformat_coqa(raw_val)
 
     else:
         raise ValueError
