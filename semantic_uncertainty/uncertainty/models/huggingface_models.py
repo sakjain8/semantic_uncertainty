@@ -104,11 +104,13 @@ class HuggingfaceModel(BaseModel):
                 kwargs = {}
                 eightbit = False
 
+            # If user gives a full HF path (contains '/'), do NOT rewrite it.
             if 'Llama-2' in model_name:
                 base = 'meta-llama'
                 model_name = model_name + '-hf'
             else:
                 base = 'huggyllama'
+
 
             self.tokenizer = AutoTokenizer.from_pretrained(
                 f"{base}/{model_name}", device_map="auto",
@@ -124,7 +126,7 @@ class HuggingfaceModel(BaseModel):
 
             elif llama2_70b or llama65b:
                 path = snapshot_download(
-                    repo_id=f'{base}/{model_name}',
+                    repo_id= f"{base}/{model_name}",
                     allow_patterns=['*.json', '*.model', '*.safetensors'],
                     ignore_patterns=['pytorch_model.bin.index.json']
                 )
