@@ -14,6 +14,7 @@ from uncertainty.data.data_utils import load_ds
 from uncertainty.utils import utils
 from uncertainty.uncertainty_measures import p_true as p_true_utils
 from compute_uncertainty_measures import main as main_compute
+from uncertainty.data.synthetic_multiturn_squad import load_synthetic_multiturn_squad
 
 
 utils.setup_logger()
@@ -30,6 +31,7 @@ def main(args):
         if not args.answerable_only:
             logging.info('Forcing `answerable_only=True` for squad dataset.')
             args.answerable_only = True
+    
 
     experiment_details = {'args': args}
     random.seed(args.random_seed)

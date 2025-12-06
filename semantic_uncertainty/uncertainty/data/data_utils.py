@@ -3,6 +3,7 @@ import os
 import json
 import hashlib
 import datasets
+from uncertainty.data.synthetic_multiturn_squad import load_synthetic_multiturn_squad
 
 
 def load_ds(dataset_name, seed, add_options=None):
@@ -159,8 +160,16 @@ def load_ds(dataset_name, seed, add_options=None):
         dataset = dataset.train_test_split(test_size=0.8, seed=seed)
         train_dataset = dataset['train']
         validation_dataset = dataset['test']
+    elif dataset_name == 'synthetic_multiturn_squad':
+        ds = load_synthetic_multiturn_squad("synthetic_multiturn_squad.xlsx")
+
+        # we only created 'validation' split in the loader above
+        validation_dataset = ds['validation']
+        # For now, reuse the same split as 'train' as well (fine for our use case)
+        train_dataset = validation_dataset
+        return train_dataset, validation_dataset
 
     else:
-        raise ValueError
-
+        raise ValueError(f"Unknown dataset {dataset_name}")
+    
     return train_dataset, validation_dataset

@@ -1,6 +1,8 @@
 """Functions for performance evaluation, mainly used in analyze_results.py."""
 import numpy as np
 import scipy
+import re
+import string
 from sklearn import metrics
 
 
@@ -39,6 +41,42 @@ def area_under_thresholded_accuracy(accuracies, uncertainties):
     area = (select_accuracies * dx).sum()
     return area
 
+def normalize_answer(s: str) -> str:
+    """Lower text and remove punctuation, articles and extra whitespace."""
+    def lower(text):
+        return text.lower()
+
+    def remove_punc(text):
+        return "".join(ch for ch in text if ch not in set(string.punctuation))
+
+    def remove_articles(text):
+        return re.sub(r"\b(a|an|the)\b", " ", text)
+
+    def white_space_fix(text):
+        return " ".join(text.split())
+
+    return white_space_fix(remove_articles(remove_punc(lower(s))))
+
+
+def f1_score(pred: str, gold: str) -> float:
+    """Token-level F1 between prediction and gold (SQuAD/CoQA style)."""
+    pred_tokens = normalize_answer(pred).split()
+    gold_tokens = normalize_answer(gold).split()
+
+    if len(pred_tokens) == 0 and len(gold_tokens) == 0:
+        return 1.0
+    if len(pred_tokens) == 0 or len(gold_tokens) == 0:
+        return 0.0
+
+    common = set(pred_tokens) & set(gold_tokens)
+    if len(common) == 0:
+        return 0.0
+
+    prec = len(common) / len(pred_tokens)
+    rec  = len(common) / len(gold_tokens)
+    if prec + rec == 0:
+        return 0.0
+    return 2 * prec * rec / (prec + rec)
 
 # Need wrappers because scipy expects 1D data.
 def compatible_bootstrap(func, rng):
