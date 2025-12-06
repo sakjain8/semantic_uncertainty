@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from uncertainty.uncertainty_measures.memory_semantic_entropy import (
+from uncertainty.uncertainty_measures.memory_sematic_entropy import (
     DialogueMemory,
     memory_conditioned_semantic_entropy,
 )
