@@ -160,8 +160,8 @@ def compute_memory_conditioned_se(
 
 def main():
     # ---- PATHS: adjust if needed ----
-    generations_path = "validation_generations.pkl"
-    uncertainty_path = "uncertainty_measures.pkl"
+    generations_path = "NewUser/uncertainty/wandb/run-20251207_104427-kb36oazq/files/validation_generations.pkl"
+    uncertainty_path = "NewUser/uncertainty/wandb/run-20251207_104427-kb36oazq/files/uncertainty_measures.pkl"
     baseline_eval_path = "baseline_semantic_eval.pkl"
 
     print("Loading base semantic entropy and generations...")

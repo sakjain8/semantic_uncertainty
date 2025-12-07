@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from uncertainty.uncertainty_measures.memory_semantic_entropy import (
+from uncertainty.uncertainty_measures.memory_sematic_entropy import (
     DialogueMemory,
     memory_conditioned_semantic_entropy,
 )
@@ -16,6 +16,7 @@ from uncertainty.utils.eval_utils import (
     auroc,
     area_under_thresholded_accuracy,
 )
+from uncertainty.uncertainty_measures.semantic_entropy import EntailmentDeberta
 # We reuse your semantic correctness rule from the baseline script
 from evaluate_semantic_correctness_baseline import is_semantically_correct
 
@@ -53,6 +54,8 @@ def main(
 
     total = 0
     correct = 0
+    # Create entailment model once (reuse for all calls)
+    entail_model = EntailmentDeberta()
 
     # We will also store H_MC for AUROC/AUTA
     h_mc_list: List[float] = []
@@ -95,7 +98,7 @@ def main(
                 responses=responses,
                 question_text=question,
                 memory=memory,
-                entail_model=None,         # handled inside module if needed
+                entail_model=entail_model,         # handled inside module if needed
                 strict_entailment=False,
             )
             H_MC = mc["H_MC"]
@@ -172,7 +175,7 @@ def main(
     logging.info("Saved MC-SE evaluation to %s", out_path)
 
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--xlsx_path",
