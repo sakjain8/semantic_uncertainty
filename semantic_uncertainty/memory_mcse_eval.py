@@ -1,26 +1,25 @@
-import os
-import pickle
+import argparse
 import logging
-from typing import Dict, Any, Optional
+import pickle
+from typing import List, Dict, Any
 
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-import torch
 
-from uncertainty.uncertainty_measures.memory_sematic_entropy import (
+from uncertainty.uncertainty_measures.memory_semantic_entropy import (
     DialogueMemory,
     memory_conditioned_semantic_entropy,
 )
-from uncertainty.entailment import EntailmentDeberta   # our DeBERTa wrapper
-from uncertainty.utils.eval_utils import f1_score
-
+from uncertainty.utils.eval_utils import (
+    f1_score,
+    auroc,
+    area_under_thresholded_accuracy,
+)
+# We reuse your semantic correctness rule from the baseline script
+from evaluate_semantic_correctness_baseline import is_semantically_correct
 
 logging.basicConfig(level=logging.INFO)
-LOGGER = logging.getLogger(__name__)
-
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-LOGGER.info("Using device for MC-SE: %s", DEVICE)
 
 
 def load_generations(path: str) -> Dict[str, Any]:
@@ -28,229 +27,174 @@ def load_generations(path: str) -> Dict[str, Any]:
         return pickle.load(f)
 
 
-def load_baseline_eval(
-    baseline_eval_path: Optional[str],
-) -> Dict[str, Dict[str, Any]]:
-    """
-    Load baseline_semantic_eval.pkl and index by id.
-
-    Expected structure (from your baseline script):
-        {
-          "accuracy": float,
-          "results": [
-              {
-                  "id": ...,
-                  "question": ...,
-                  "pred": ...,
-                  "gold": ...,
-                  "correct": 0/1,
-                  "f1": float,
-                  "emb_sim": float,
-                  "nli_label": int or None,
-              },
-              ...
-          ],
-          "thresholds": {...}
-        }
-    """
-    if baseline_eval_path is None or not os.path.exists(baseline_eval_path):
-        LOGGER.warning("No baseline eval found at %s", baseline_eval_path)
-        return {}
-
-    LOGGER.info("Loading baseline semantic eval from: %s", baseline_eval_path)
-    with open(baseline_eval_path, "rb") as f:
-        data = pickle.load(f)
-
-    results = data.get("results", [])
-    by_id = {str(r["id"]): r for r in results}
-    LOGGER.info("Loaded %d baseline eval entries", len(by_id))
-    return by_id
-
-
 def main(
-    xlsx_path: str = "synthetic_multiturn_squad.xlsx",
-    generations_path: str = "validation_generations.pkl",
-    baseline_eval_path: Optional[str] = "baseline_semantic_eval.pkl",
-    output_csv: str = "memory_consistency_results.csv",
-    output_pkl: str = "memory_consistency_results.pkl",
-):
-    # 1) Load synthetic multiturn dataset (for dialogue / repeat structure)
+    xlsx_path: str,
+    generations_path: str,
+    out_path: str,
+) -> None:
+    logging.info("Loading synthetic multiturn dataset from %s", xlsx_path)
     df = pd.read_excel(xlsx_path)
-    df["id"] = df.apply(
-        lambda row: f"{row['dialogue_id']}_t{int(row['turn_id'])}",
-        axis=1,
-    )
-    LOGGER.info("Loaded %d turns from synthetic multiturn SQuAD.", len(df))
 
-    # 2) Load generations
+    # IMPORTANT: this must match how IDs are stored in validation_generations.pkl
+    # In your previous run, keys looked like: 'validation_84fddccf_d1_t1'
+    # and dialogue_id was e.g. 'validation_84fddccf_d1'
+    if "id" not in df.columns:
+        df["id"] = df.apply(
+            lambda row: f"{row['dialogue_id']}_t{int(row['turn_id'])}",
+            axis=1,
+        )
+    logging.info("Loaded %d turns from synthetic multiturn SQuAD.", len(df))
+
+    logging.info("Loading generations from %s", generations_path)
     gens = load_generations(generations_path)
-    LOGGER.info("Loaded %d generations from %s", len(gens), generations_path)
+    logging.info("Loaded %d generation entries.", len(gens))
 
-    # 3) Load baseline semantic correctness (for comparison)
-    baseline_by_id = load_baseline_eval(baseline_eval_path)
+    records: List[Dict[str, Any]] = []
 
-    # 4) NLI model for MC-SE
-    entail_model = EntailmentDeberta(device=DEVICE)
+    total = 0
+    correct = 0
 
-    records = []
+    # We will also store H_MC for AUROC/AUTA
+    h_mc_list: List[float] = []
+    is_false_list: List[int] = []  # 1 = error, 0 = correct
 
-    # 5) Process dialogues sequentially
+    # Iterate dialogue by dialogue to maintain memory
     for dlg_id, group in tqdm(df.groupby("dialogue_id"), desc="Dialogues"):
         group = group.sort_values("turn_id")
-        memory = DialogueMemory()
-        slot_answers = {}  # base_qid -> earliest answer
+        memory = DialogueMemory()      # fresh memory per dialogue
 
         for _, row in group.iterrows():
-            ex_id = str(row["id"])
-            turn_id = int(row["turn_id"])
+            ex_id = row["id"]
+            question = str(row["question"])
+            gold_answer = str(row["answer"])
             is_repeat = int(row["is_repeat"])
             base_qid = str(row["base_qid"])
-            gold_answer = str(row["answer"])
-            question = str(row["question"])
 
             if ex_id not in gens:
-                LOGGER.warning("Example id %s not in generations; skipping.", ex_id)
+                logging.warning("Example id %s not in generations; skipping.", ex_id)
                 continue
 
             gen_entry = gens[ex_id]
             most_likely = gen_entry["most_likely_answer"]
             model_answer = str(most_likely["response"])
+
+            # High-T responses used for entropy
             responses = gen_entry.get("responses", [])
 
-            # --------------------------
-            # A. factual correctness (F1 vs gold)
-            # --------------------------
-            f1_fact = f1_score(model_answer, gold_answer)
-            factually_correct = int(f1_fact >= 0.8)
-
-            # --------------------------
-            # B. self-consistency on re-asks
-            # --------------------------
-            if is_repeat == 1 and base_qid in slot_answers:
-                prev_answer = slot_answers[base_qid]
-                f1_self = f1_score(model_answer, prev_answer)
-                self_consistent = int(f1_self >= 0.8)
+            # 1) Semantic correctness (same rule as baseline)
+            is_corr, details = is_semantically_correct(model_answer, gold_answer)
+            total += 1
+            if is_corr:
+                correct += 1
+                is_false = 0
             else:
-                prev_answer = None
-                f1_self = None
-                self_consistent = None  # not applicable
+                is_false = 1
 
-            # --------------------------
-            # C. memory-conditioned semantic entropy (MC-SE)
-            # --------------------------
+            # 2) Memory-conditioned semantic entropy H_MC
             mc = memory_conditioned_semantic_entropy(
                 responses=responses,
                 question_text=question,
                 memory=memory,
-                entail_model=entail_model,
+                entail_model=None,         # handled inside module if needed
                 strict_entailment=False,
             )
             H_MC = mc["H_MC"]
 
-            # update memory only after computing H_MC
+            # 3) Update memory AFTER computing H_MC
             memory.add_fact(model_answer)
-            if base_qid not in slot_answers:
-                slot_answers[base_qid] = model_answer
 
-            # --------------------------
-            # D. Baseline semantic correctness (from previous eval)
-            # --------------------------
-            base = baseline_by_id.get(ex_id)
-            if base is not None:
-                base_correct = int(base["correct"])
-                base_f1 = float(base.get("f1", np.nan))
-                base_emb_sim = float(base.get("emb_sim", np.nan))
-                base_nli = base.get("nli_label", None)
-            else:
-                base_correct = None
-                base_f1 = None
-                base_emb_sim = None
-                base_nli = None
-
+            # 4) Save per-example record
             records.append(
                 {
                     "dialogue_id": dlg_id,
-                    "turn_id": turn_id,
+                    "turn_id": int(row["turn_id"]),
                     "id": ex_id,
                     "question": question,
                     "gold_answer": gold_answer,
                     "model_answer": model_answer,
                     "is_repeat": is_repeat,
                     "base_qid": base_qid,
-                    # factual correctness
-                    "f1_fact": f1_fact,
-                    "factually_correct": factually_correct,
-                    # self-consistency
-                    "f1_self_consistency": f1_self,
-                    "self_consistent": self_consistent,
-                    # MC-SE
-                    "H_MC": H_MC,
-                    # baseline semantic correctness (for direct comparison)
-                    "baseline_correct": base_correct,
-                    "baseline_f1": base_f1,
-                    "baseline_emb_sim": base_emb_sim,
-                    "baseline_nli_label": base_nli,
+                    "semantically_correct": int(is_corr),
+                    "f1": details["f1"],
+                    "emb_sim": details["sim"],
+                    "nli_label": details["nli"],
+                    "H_MC": float(H_MC),
                 }
             )
 
-    out_df = pd.DataFrame(records)
-    out_df.to_csv(output_csv, index=False)
-    LOGGER.info("Wrote %d rows to %s", len(out_df), output_csv)
+            h_mc_list.append(float(H_MC))
+            is_false_list.append(is_false)
 
-    # also save as pkl for easier loading in notebooks
-    with open(output_pkl, "wb") as f:
-        pickle.dump({"results": records}, f)
-    LOGGER.info("Pickle results written to %s", output_pkl)
+    if total == 0:
+        logging.error("No examples matched between XLSX and generations. Check IDs / paths.")
+        return
 
-    # Simple quick summary: how H_MC differs for correct vs incorrect (baseline)
-    mask = out_df["baseline_correct"].notna()
-    df_sub = out_df[mask]
-    if not df_sub.empty:
-        corr_acc = df_sub["baseline_correct"].mean()
-        mean_H_correct = df_sub.loc[df_sub["baseline_correct"] == 1, "H_MC"].mean()
-        mean_H_wrong = df_sub.loc[df_sub["baseline_correct"] == 0, "H_MC"].mean()
-        LOGGER.info("On subset with baseline eval:")
-        LOGGER.info("  Baseline accuracy: %.4f", corr_acc)
-        LOGGER.info("  Mean H_MC (correct):   %.4f", mean_H_correct)
-        LOGGER.info("  Mean H_MC (incorrect): %.4f", mean_H_wrong)
+    acc = correct / total
+    print(f"\nSemantic correctness accuracy (MC-SE branch): {acc:.4f}")
+    print(f"Total examples: {total}, Correct: {correct}")
+
+    # Convert to numpy arrays for metrics
+    h_mc_arr = np.array(h_mc_list)
+    is_false_arr = np.array(is_false_list)
+    accuracies_arr = 1 - is_false_arr
+
+    # AUROC: how well H_MC separates errors vs correct
+    try:
+        h_mc_auroc = auroc(is_false_arr, h_mc_arr)
+    except Exception as e:
+        logging.error("Error computing AUROC for H_MC: %s", e)
+        h_mc_auroc = float("nan")
+
+    # Area under thresholded accuracy (selective QA style)
+    try:
+        h_mc_auta = area_under_thresholded_accuracy(
+            accuracies_arr,
+            h_mc_arr,
+        )
+    except Exception as e:
+        logging.error("Error computing AUTA for H_MC: %s", e)
+        h_mc_auta = float("nan")
+
+    print(f"AUROC (H_MC → error): {h_mc_auroc:.4f}")
+    print(f"Area under thresholded accuracy (H_MC): {h_mc_auta:.4f}")
+
+    # Save everything to a pickle, similar to baseline_semantic_eval.pkl
+    out_obj = {
+        "accuracy": acc,
+        "h_mc_auroc": h_mc_auroc,
+        "h_mc_auta": h_mc_auta,
+        "results": records,
+    }
+
+    with open(out_path, "wb") as f:
+        pickle.dump(out_obj, f)
+
+    logging.info("Saved MC-SE evaluation to %s", out_path)
 
 
-if __name__ == "__main__":
-    import argparse
-
+if _name_ == "_main_":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--xlsx_path",
         type=str,
         default="synthetic_multiturn_squad.xlsx",
+        help="Path to synthetic multi-turn SQuAD XLSX.",
     )
     parser.add_argument(
         "--generations_path",
         type=str,
         default="validation_generations.pkl",
+        help="Path to validation_generations.pkl from generate_answers.py",
     )
     parser.add_argument(
-        "--baseline_eval_path",
+        "--out_path",
         type=str,
-        default="baseline_semantic_eval.pkl",
-        help="Output of evaluate_semantic_correctness_baseline.py",
+        default="mcse_eval.pkl",
+        help="Where to save MC-SE evaluation results.",
     )
-    parser.add_argument(
-        "--output_csv",
-        type=str,
-        default="memory_consistency_results.csv",
-    )
-    parser.add_argument(
-        "--output_pkl",
-        type=str,
-        default="memory_consistency_results.pkl",
-    )
-
     args = parser.parse_args()
     main(
         xlsx_path=args.xlsx_path,
         generations_path=args.generations_path,
-        baseline_eval_path=args.baseline_eval_path,
-        output_csv=args.output_csv,
-        output_pkl=args.output_pkl,
+        out_path=args.out_path,
     )

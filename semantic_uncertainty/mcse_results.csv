@@ -1,6 +1,0 @@
-dialogue_id,turn_id,id,question,gold_answer,model_answer,is_repeat,base_qid,f1_fact,factually_correct,f1_self_consistency,self_consistent,H_MC
-train_28e9913b_d1,1,train_28e9913b_d1_t1,"According to Gaddafi, what insects made up God's armies?",tsetse fly and mosquito,ants,0,train_28e9913b_d1_q1,0.0,0,,,-0.0
-train_3fa93383_d1,5,train_3fa93383_d1_t5,What would have maintained power if the treaty was signed?,Communist Party,The treaty would have maintained power if it had been signed.,0,train_3fa93383_d1_q4,0.0,0,,,-0.0
-train_7f593154_d1,3,train_7f593154_d1_t3,What disciplines were women trained in during the first century?,"music, dancing and poetry","midwifery, weaving, spinning, and pottery",0,train_7f593154_d1_q3,0.22222222222222224,0,,,-0.0
-train_9fe1a471_d1,4,train_9fe1a471_d1_t4,(Reask) How did the reforms of Britains voting system affect the House of Commons? ,increased the power,Proportional representation,1,train_9fe1a471_d1_q2,0.0,0,,,-0.0
-train_aea7b1ef_d1,1,train_aea7b1ef_d1_t1,What was the goal of the first trading companies?,obtain trading concessions by treaty,to establish trade routes and to make a profit from it.,0,train_aea7b1ef_d1_q1,0.0,0,,,-0.0

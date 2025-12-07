@@ -177,8 +177,15 @@ def main(args):
             # Flatten indices: process all questions in each chosen dialogue
             indices = []
             for did in chosen_dialogues:
-                # Keep them in the order they appear in dataset
-                indices.extend(dialogue_to_indices[did])
+                idxs = dialogue_to_indices[did]
+            
+                # sort by turn_id if available; fall back to dataset order
+                idxs_sorted = sorted(
+                    idxs,
+                    key=lambda idx: dataset[idx].get('turn_id', 0)
+                )
+                indices.extend(idxs_sorted)
+
 
             experiment_details[dataset_split] = {
                 'dialogue_ids': chosen_dialogues,
@@ -196,11 +203,19 @@ def main(args):
                 torch.cuda.empty_cache()
             it += 1
 
-            # Grab example at index.
             example = dataset[index]
             question, context = example["question"], example['context']
-            generations[example['id']] = {'question': question, 'context': context}
+            
+            generations[example['id']] = {
+                'question': question,
+                'context': context,
+                # ✅ store dialogue + turn so memory can be per-dialogue, in order
+                'dialogue_id': example.get('dialogue_id'),
+                'turn_id': example.get('turn_id'),
+            }
+            
             correct_answer = example['answers']['text']
+
 
             current_input = make_prompt(
                 context, question, None, BRIEF, args.brief_always and args.enable_brief)
