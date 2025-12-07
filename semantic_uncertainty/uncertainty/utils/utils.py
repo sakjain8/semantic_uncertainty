@@ -56,6 +56,10 @@ def get_parser(stages=['generate', 'compute']):
             "--num_samples", type=int, default=400,
             help="Number of samples to use")
         parser.add_argument(
+        '--sample_by_dialogue',
+        action='store_true',
+        help='Sample num_samples dialogue IDs instead of individual questions when dataset has dialogue_id.')
+        parser.add_argument(
             "--num_few_shot", type=int, default=5,
             help="Number of few shot examples to use")
         parser.add_argument(

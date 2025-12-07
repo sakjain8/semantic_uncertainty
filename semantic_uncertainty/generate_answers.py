@@ -9,6 +9,8 @@ from tqdm import tqdm
 import numpy as np
 import torch
 import wandb
+import collections
+
 
 from uncertainty.data.data_utils import load_ds
 from uncertainty.utils import utils
@@ -139,8 +141,46 @@ def main(args):
             possible_indices = range(0, len(dataset))
 
         # Evaluate over random subset of the datasets.
-        indices = random.sample(possible_indices, min(args.num_samples, len(dataset)))
-        experiment_details[dataset_split] = {'indices': indices}
+        # Option 1: normal behavior (sample questions)
+        if not getattr(args, 'sample_by_dialogue', False):
+            indices = random.sample(
+                list(possible_indices),
+                min(args.num_samples, len(possible_indices))
+            )
+            experiment_details[dataset_split] = {'indices': indices}
+
+        # Option 2: sample dialogue_ids and then take all their questions
+        else:
+            # Build mapping: dialogue_id -> list of example indices
+            dialogue_to_indices = collections.OrderedDict()
+            for idx in possible_indices:
+                ex = dataset[idx]
+                if 'dialogue_id' not in ex:
+                    raise ValueError(
+                        "sample_by_dialogue=True but example has no 'dialogue_id' field."
+                    )
+                did = ex['dialogue_id']
+                if did not in dialogue_to_indices:
+                    dialogue_to_indices[did] = []
+                dialogue_to_indices[did].append(idx)
+
+            all_dialogues = list(dialogue_to_indices.keys())
+
+            # Here num_samples means "number of dialogues"
+            num_dialogues = min(args.num_samples, len(all_dialogues))
+            chosen_dialogues = random.sample(all_dialogues, num_dialogues)
+
+            # Flatten indices: process all questions in each chosen dialogue
+            indices = []
+            for did in chosen_dialogues:
+                # Keep them in the order they appear in dataset
+                indices.extend(dialogue_to_indices[did])
+
+            experiment_details[dataset_split] = {
+                'dialogue_ids': chosen_dialogues,
+                'indices': indices,
+            }
+
 
         if args.num_samples > len(dataset):
             logging.warning('Not enough samples in dataset. Using all %d samples.', len(dataset))
