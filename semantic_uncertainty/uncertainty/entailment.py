@@ -1,5 +1,6 @@
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from typing import Any
 
 
 class EntailmentDeberta:
@@ -26,7 +27,13 @@ class EntailmentDeberta:
         self.model.eval()
 
     @torch.no_grad()
-    def check_implication(self, premise: str, hypothesis: str) -> int:
+    def check_implication(
+        self,
+        premise: str,
+        hypothesis: str,
+        example: Any = None,
+        **kwargs: Any,
+    ) -> int:
         """
         Returns the predicted label id:
             0 = contradiction

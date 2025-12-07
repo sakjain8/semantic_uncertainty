@@ -288,7 +288,7 @@ def main(args: argparse.Namespace) -> None:
 # 7. CLI entrypoint
 ##############################################
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--generations_path",
