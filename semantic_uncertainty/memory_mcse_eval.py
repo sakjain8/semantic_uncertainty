@@ -17,7 +17,7 @@ from uncertainty.utils.eval_utils import (
     area_under_thresholded_accuracy,
 )
 from uncertainty.uncertainty_measures.semantic_entropy import EntailmentDeberta
-# We reuse your semantic correctness rule from the baseline script
+# reuse the same semantic correctness rule as baseline
 from evaluate_semantic_correctness_baseline import is_semantically_correct
 
 logging.basicConfig(level=logging.INFO)
@@ -36,9 +36,7 @@ def main(
     logging.info("Loading synthetic multiturn dataset from %s", xlsx_path)
     df = pd.read_excel(xlsx_path)
 
-    # IMPORTANT: this must match how IDs are stored in validation_generations.pkl
-    # In your previous run, keys looked like: 'validation_84fddccf_d1_t1'
-    # and dialogue_id was e.g. 'validation_84fddccf_d1'
+    # Make sure we have the same id format as in validation_generations.pkl
     if "id" not in df.columns:
         df["id"] = df.apply(
             lambda row: f"{row['dialogue_id']}_t{int(row['turn_id'])}",
@@ -50,21 +48,20 @@ def main(
     gens = load_generations(generations_path)
     logging.info("Loaded %d generation entries.", len(gens))
 
+    # Entailment model (reused for all calls)
+    entail_model = EntailmentDeberta()
+
     records: List[Dict[str, Any]] = []
+    h_mc_list: List[float] = []
+    is_false_list: List[int] = []   # 1 = error, 0 = correct
 
     total = 0
     correct = 0
-    # Create entailment model once (reuse for all calls)
-    entail_model = EntailmentDeberta()
 
-    # We will also store H_MC for AUROC/AUTA
-    h_mc_list: List[float] = []
-    is_false_list: List[int] = []  # 1 = error, 0 = correct
-
-    # Iterate dialogue by dialogue to maintain memory
+    # Iterate dialogue by dialogue so that memory resets per dialogue
     for dlg_id, group in tqdm(df.groupby("dialogue_id"), desc="Dialogues"):
         group = group.sort_values("turn_id")
-        memory = DialogueMemory()      # fresh memory per dialogue
+        memory = DialogueMemory()        # fresh memory per dialogue
 
         for _, row in group.iterrows():
             ex_id = row["id"]
@@ -80,11 +77,9 @@ def main(
             gen_entry = gens[ex_id]
             most_likely = gen_entry["most_likely_answer"]
             model_answer = str(most_likely["response"])
-
-            # High-T responses used for entropy
             responses = gen_entry.get("responses", [])
 
-            # 1) Semantic correctness (same rule as baseline)
+            # 1) Semantic correctness (same as baseline)
             is_corr, details = is_semantically_correct(model_answer, gold_answer)
             total += 1
             if is_corr:
@@ -94,19 +89,21 @@ def main(
                 is_false = 1
 
             # 2) Memory-conditioned semantic entropy H_MC
+            #    NOTE: memory_conditioned_semantic_entropy now expects memory_facts
+            memory_facts = memory.get_facts()
             mc = memory_conditioned_semantic_entropy(
                 responses=responses,
                 question_text=question,
-                memory=memory,
-                entail_model=entail_model,         # handled inside module if needed
+                memory_facts=memory_facts,   # <-- key change
+                entail_model=entail_model,
                 strict_entailment=False,
             )
-            H_MC = mc["H_MC"]
+            H_MC = float(mc["H_MC"])
 
-            # 3) Update memory AFTER computing H_MC
+            # 3) Update memory AFTER using current answer
             memory.add_fact(model_answer)
 
-            # 4) Save per-example record
+            # 4) store per-example record
             records.append(
                 {
                     "dialogue_id": dlg_id,
@@ -121,39 +118,35 @@ def main(
                     "f1": details["f1"],
                     "emb_sim": details["sim"],
                     "nli_label": details["nli"],
-                    "H_MC": float(H_MC),
+                    "H_MC": H_MC,
                 }
             )
 
-            h_mc_list.append(float(H_MC))
+            h_mc_list.append(H_MC)
             is_false_list.append(is_false)
 
     if total == 0:
-        logging.error("No examples matched between XLSX and generations. Check IDs / paths.")
+        logging.error("No examples matched between XLSX and generations. "
+                      "Check IDs / paths (dialogue_id + tX).")
         return
 
     acc = correct / total
     print(f"\nSemantic correctness accuracy (MC-SE branch): {acc:.4f}")
     print(f"Total examples: {total}, Correct: {correct}")
 
-    # Convert to numpy arrays for metrics
+    # === Uncertainty metrics ===
     h_mc_arr = np.array(h_mc_list)
     is_false_arr = np.array(is_false_list)
-    accuracies_arr = 1 - is_false_arr
+    accuracies_arr = 1.0 - is_false_arr
 
-    # AUROC: how well H_MC separates errors vs correct
     try:
         h_mc_auroc = auroc(is_false_arr, h_mc_arr)
     except Exception as e:
         logging.error("Error computing AUROC for H_MC: %s", e)
         h_mc_auroc = float("nan")
 
-    # Area under thresholded accuracy (selective QA style)
     try:
-        h_mc_auta = area_under_thresholded_accuracy(
-            accuracies_arr,
-            h_mc_arr,
-        )
+        h_mc_auta = area_under_thresholded_accuracy(accuracies_arr, h_mc_arr)
     except Exception as e:
         logging.error("Error computing AUTA for H_MC: %s", e)
         h_mc_auta = float("nan")
@@ -161,7 +154,6 @@ def main(
     print(f"AUROC (H_MC → error): {h_mc_auroc:.4f}")
     print(f"Area under thresholded accuracy (H_MC): {h_mc_auta:.4f}")
 
-    # Save everything to a pickle, similar to baseline_semantic_eval.pkl
     out_obj = {
         "accuracy": acc,
         "h_mc_auroc": h_mc_auroc,

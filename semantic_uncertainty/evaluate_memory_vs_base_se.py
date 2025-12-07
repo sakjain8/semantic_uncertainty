@@ -132,12 +132,13 @@ def compute_memory_conditioned_se(
 
         # Compute memory-conditioned SE for this turn
         mc_result = memory_conditioned_semantic_entropy(
-            responses=responses,
-            question_text=question,
-            memory=mem,
-            entail_model=entailment_model,
-            strict_entailment=False,
-        )
+        responses=responses,
+        question_text=question,
+        memory_facts=mem.get_facts(),   # <-- list[str]
+        entail_model=entailment_model,
+        strict_entailment=False,
+    )
+
 
         H_MC_list.append(mc_result["H_MC"])
 
@@ -160,8 +161,8 @@ def compute_memory_conditioned_se(
 
 def main():
     # ---- PATHS: adjust if needed ----
-    generations_path = "NewUser/uncertainty/wandb/run-20251207_104427-kb36oazq/files/validation_generations.pkl"
-    uncertainty_path = "NewUser/uncertainty/wandb/run-20251207_104427-kb36oazq/files/uncertainty_measures.pkl"
+    generations_path = "User1/uncertainty/wandb/run-20251207_123752-inzai1e3/files/validation_generations.pkl"
+    uncertainty_path = "User1/uncertainty/wandb/run-20251207_123752-inzai1e3/files/uncertainty_measures.pkl"
     baseline_eval_path = "baseline_semantic_eval.pkl"
 
     print("Loading base semantic entropy and generations...")

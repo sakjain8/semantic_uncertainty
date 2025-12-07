@@ -34,21 +34,22 @@ def _sample_logprob(token_log_likelihoods: List[float]) -> float:
     return float(np.sum(token_log_likelihoods))
 
 
+# memory_semantic_entropy.py
+
 def _weight_sample_against_memory(
     sample_text: str,
     memory_facts: List[str],
     entail_model: EntailmentDeberta,
-    contradiction_penalty: float = 0.2,
+    contradiction_penalty: float = 0.5,
 ) -> float:
     """
-    Simple w(s, M) ∈ [0,1]:
+    w(s, M) in [0,1].
 
-    - If sample contradicts ANY memory fact (either direction): down-weight.
-    - Otherwise: keep weight = 1.0.
+    - If sample contradicts ANY of the provided memory_facts: down-weight.
+    - Otherwise: weight = 1.0.
 
-    You can make this more nuanced later, e.g.:
-      - reward entailment with >1.0 then renormalize
-      - distinguish neutral/entailment.
+    NOTE: Caller should pass only *relevant* memory facts
+          (e.g., previous answers for the same base_qid).
     """
     if not memory_facts:
         return 1.0
@@ -57,7 +58,7 @@ def _weight_sample_against_memory(
         s_to_m = entail_model.check_implication(sample_text, fact)
         m_to_s = entail_model.check_implication(fact, sample_text)
 
-        # EntailmentDeberta: 0 = contradiction, 1 = neutral, 2 = entailment
+        # 0 = contradiction, 1 = neutral, 2 = entailment
         if s_to_m == 0 or m_to_s == 0:
             return contradiction_penalty
 
@@ -67,7 +68,7 @@ def _weight_sample_against_memory(
 def memory_conditioned_semantic_entropy(
     responses: List[tuple],
     question_text: str,
-    memory: DialogueMemory,
+    memory_facts: List[str],          # <<< CHANGED: we pass facts directly
     entail_model: EntailmentDeberta,
     strict_entailment: bool = False,
 ) -> Dict[str, Any]:
@@ -76,14 +77,12 @@ def memory_conditioned_semantic_entropy(
 
     responses: list of tuples:
       (predicted_answer, token_log_likelihoods, embedding, accuracy)
-      as produced in generate_answers.py under 'responses'.
+
+    memory_facts: list of strings. The *caller* decides what 'memory' means
+                  (e.g., previous answers to same base_qid, or empty for no memory).
 
     Returns dict with:
-      - H_MC: float
-      - cluster_probs_mc: list[float] (π_t(i))
-      - semantic_ids: list[int] (cluster id per sample)
-      - sample_logprobs: list[float]
-      - sample_weights: list[float] (w(s, M))
+      - H_MC, cluster_probs_mc, semantic_ids, sample_logprobs, sample_weights
     """
     if len(responses) == 0:
         return {
@@ -110,20 +109,19 @@ def memory_conditioned_semantic_entropy(
         example={"question": question_text},
     )
 
-    # 3. Compute weights w(s, M) from memory
-    mem_facts = memory.get_facts()
+    # 3. Compute weights w(s, M) from *slot-specific* memory
     sample_weights = []
     for txt in sample_texts:
-        w = _weight_sample_against_memory(txt, mem_facts, entail_model)
+        w = _weight_sample_against_memory(txt, memory_facts, entail_model)
         sample_weights.append(w)
     sample_weights = np.array(sample_weights)
 
-    # 4. Combine P(s|x) and w(s, M)
+    # 4. Combine log p(s|x) + log w(s,M)
     eps = 1e-8
     log_weights = np.log(sample_weights + eps)
     log_weighted = sample_logprobs + log_weights
 
-    # 5. Aggregate to cluster space with log-sum-exp (same API as original SE)
+    # 5. Aggregate to cluster space with log-sum-exp (same as original SE)
     log_cluster_probs_mc = logsumexp_by_id(
         semantic_ids=semantic_ids,
         log_likelihoods=log_weighted,
