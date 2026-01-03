@@ -10,7 +10,7 @@ from uncertainty.uncertainty_measures.memory_sematic_entropy import (
     memory_conditioned_semantic_entropy,
 )
 
-DATA_PATH = "synthetic_multiturn_squad.xlsx"
+DATA_PATH = "synthetic_multiturn_squad_sample_10_dialogues.xlsx"
 OUT_CSV = "mcse_belief_trajectories.csv"
 
 NUM_SAMPLES = 8
