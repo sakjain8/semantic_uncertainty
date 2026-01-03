@@ -64,6 +64,8 @@ def main(
         memory = DialogueMemory()        # fresh memory per dialogue
 
         for _, row in group.iterrows():
+            if int(row["is_repeat"]) == 0:
+                continue
             ex_id = row["id"]
             question = str(row["question"])
             gold_answer = str(row["answer"])
@@ -101,7 +103,8 @@ def main(
             H_MC = float(mc["H_MC"])
 
             # 3) Update memory AFTER using current answer
-            memory.add_fact(model_answer)
+            if is_corr:
+                memory.add_fact(gold_answer)
 
             # 4) store per-example record
             records.append(

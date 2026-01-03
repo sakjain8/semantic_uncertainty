@@ -40,7 +40,7 @@ def _weight_sample_against_memory(
     sample_text: str,
     memory_facts: List[str],
     entail_model: EntailmentDeberta,
-    contradiction_penalty: float = 0.5,
+    contradiction_penalty: float = 0.01,
 ) -> float:
     """
     w(s, M) in [0,1].

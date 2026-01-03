@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+import argparse
+
 from tqdm import tqdm
 from collections import defaultdict
 
@@ -16,11 +18,17 @@ OUT_CSV = "mcse_belief_trajectories.csv"
 NUM_SAMPLES = 8
 TEMPERATURE = 0.8
 
-
+parser = argparse.ArgumentParser()
+parser.add_argument("--model", type=str, default="gpt-3.5-turbo")
+parser.add_argument("--device", type=str, default="cuda")
+parser.add_argument("--seed", type=int, default=42)
+args = parser.parse_args()
 def main():
+    np.random.seed(args.seed)
     df = pd.read_excel(DATA_PATH)
     entail_model = EntailmentDeberta()
-    model = utils.init_model(utils.get_parser().parse_args([]))
+    model = utils.init_model(args)
+
 
     records = []
 
