@@ -166,9 +166,13 @@ class HuggingfaceModel(BaseModel):
 
             model_id = f'mistralai/{model_name}'
             self.tokenizer = AutoTokenizer.from_pretrained(
-                model_id, device_map='auto', token_type_ids=None,
-                clean_up_tokenization_spaces=False)
-
+                model_id,
+                use_fast=False,                  # <<< THIS FIXES IT
+                device_map='auto',
+                token_type_ids=None,
+                trust_remote_code=True,
+                clean_up_tokenization_spaces=False
+            )
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id,
                 device_map='auto',
